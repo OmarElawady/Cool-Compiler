@@ -1,0 +1,70 @@
+#1
+_program
+  #1
+  _class
+    Main
+    Object
+    "hello_world.cl"
+    (
+    #1
+    _method
+      main
+      Object
+      #1
+      _dispatch
+        #1
+        _new
+          IO
+        : _no_type
+        out_string
+        (
+        #1
+        _dispatch
+          #1
+          _object
+            self
+          : _no_type
+          type_name
+          (
+          )
+        : _no_type
+        )
+      : _no_type
+    #1
+    _method
+      test
+      SELF_TYPE
+      #1
+      _new
+        SELF_TYPE
+      : _no_type
+    )
+  #1
+  _class
+    Test
+    Main
+    "hello_world.cl"
+    (
+    #1
+    _method
+      test
+      SELF_TYPE
+      #1
+      _int
+        1
+      : _no_type
+    #1
+    _method
+      func
+      Test
+      #1
+      _dispatch
+        #1
+        _object
+          self
+        : _no_type
+        test
+        (
+        )
+      : _no_type
+    )

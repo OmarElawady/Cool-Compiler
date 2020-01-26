@@ -1,0 +1,49 @@
+#1
+_program
+  #1
+  _class
+    Main
+    IO
+    "hello_world.cl"
+    (
+    #1
+    _attr
+      a
+      A
+      #1
+      _no_expr
+      : _no_type
+    #1
+    _attr
+      b
+      B
+      #1
+      _no_expr
+      : _no_type
+    #1
+    _method
+      main
+      Int
+      #1
+      _assign
+        a
+        #1
+        _object
+          b
+        : _no_type
+      : _no_type
+    )
+  #1
+  _class
+    A
+    Object
+    "hello_world.cl"
+    (
+    )
+  #1
+  _class
+    B
+    A
+    "hello_world.cl"
+    (
+    )

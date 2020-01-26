@@ -1,0 +1,732 @@
+
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include "semant.h"
+#include "utilities.h"
+
+
+extern int semant_debug;
+extern char *curr_filename;
+
+//////////////////////////////////////////////////////////////////////
+//
+// Symbols
+//
+// For convenience, a large number of symbols are predefined here.
+// These symbols include the primitive type and method names, as well
+// as fixed names used by the runtime system.
+//
+//////////////////////////////////////////////////////////////////////
+static Symbol 
+    arg,
+    arg2,
+    Bool,
+    concat,
+    cool_abort,
+    copy,
+    Int,
+    in_int,
+    in_string,
+    IO,
+    length,
+    Main,
+    main_meth,
+    No_class,
+    No_type,
+    Object,
+    out_int,
+    out_string,
+    prim_slot,
+    self,
+    SELF_TYPE,
+    Str,
+    str_field,
+    substr,
+    type_name,
+    val;
+//
+// Initializing the predefined symbols.
+//
+static void initialize_constants(void)
+{
+    arg         = idtable.add_string("arg");
+    arg2        = idtable.add_string("arg2");
+    Bool        = idtable.add_string("Bool");
+    concat      = idtable.add_string("concat");
+    cool_abort  = idtable.add_string("abort");
+    copy        = idtable.add_string("copy");
+    Int         = idtable.add_string("Int");
+    in_int      = idtable.add_string("in_int");
+    in_string   = idtable.add_string("in_string");
+    IO          = idtable.add_string("IO");
+    length      = idtable.add_string("length");
+    Main        = idtable.add_string("Main");
+    main_meth   = idtable.add_string("main");
+    //   _no_class is a symbol that can't be the name of any 
+    //   user-defined class.
+    No_class    = idtable.add_string("_no_class");
+    No_type     = idtable.add_string("_no_type");
+    Object      = idtable.add_string("Object");
+    out_int     = idtable.add_string("out_int");
+    out_string  = idtable.add_string("out_string");
+    prim_slot   = idtable.add_string("_prim_slot");
+    self        = idtable.add_string("self");
+    SELF_TYPE   = idtable.add_string("SELF_TYPE");
+    Str         = idtable.add_string("String");
+    str_field   = idtable.add_string("_str_field");
+    substr      = idtable.add_string("substr");
+    type_name   = idtable.add_string("type_name");
+    val         = idtable.add_string("_val");
+}
+
+// Graph implementation
+Graph::Graph(int n) : n(n), root(-1){
+  this -> adj = new Neighbors*[n];
+  for(int i = 0;i < n;i++)
+    adj[i] = new Neighbors((int*) 0);
+  depth = new int[n];
+  parent = new int[n];
+  for(int i = 0;i < n;i++)
+    depth[i] = 0;
+}
+void Graph::set_root(int id){root = id;}
+void Graph::add_edge(int u, int v){
+  adj[u] = new Neighbors(new int(v), adj[u]);
+  parent[v] = u;
+}
+bool Graph::is_parent(int p, int c){
+  while(depth[p] < depth[c])
+    c = parent[c];
+  return p == c;
+}
+int Graph::lca(int u, int v){
+  while(depth[u] > depth[v])
+    u = parent[u];
+  while(depth[v] > depth[u])
+    v = parent[v];
+  while(u != v)
+    u = parent[u], v = parent[v];
+  return u;
+}
+void Graph::dfs(int u){
+  if(u == root)
+    depth[u] = 1;
+ 
+  for(Neighbors* i = adj[u];i -> hd();i = i -> tl()){
+    int v = *(i -> hd());
+    if(depth[v]){
+      throw cycle(v);
+    }
+    depth[v] = depth[u] + 1;;
+    dfs(v);
+  }
+}
+void Graph::construct(){
+  //for(int i = 0;i < n;i++)
+	//	cout << parent[i] << endl;
+  dfs(root);
+  for(int i = 0;i < n;i++)
+    if(depth[i] == 0)
+			dfs(i);
+}
+List<int>* Graph::cycle(int v){
+	List<int>* lst = new List<int>(new int(v));
+	int u = parent[v];
+	while(u != v){
+		lst = new List<int>(new int(u), lst);
+		u = parent[u];
+	}
+	return lst;
+}
+void Graph::print_tree(int u, ClassTable* ct, int in){
+  cout << pad(in) << ct -> get_name(u) -> get_string() << endl;
+  for(Neighbors* i = adj[u];i -> hd();i = i -> tl())
+    print_tree(*(i -> hd()), ct, in + 2);
+}
+void Graph::print_tree(ClassTable* ct){
+  print_tree(root, ct, 0);
+}
+
+ClassTable::ClassTable(Classes classes_) : semant_errors(0) , error_stream(cerr), classes(classes_), graph(classes -> len() + 5), symId(new SymId((ClassEntry*) NULL)) {
+	install_basic_classes();
+	assert_classes_recorded();
+  indexify_classes();
+	construct_classes_graph();
+  //dump_out();
+}
+void ClassTable::assert_classes_recorded(){
+	for(int i = classes -> first();classes -> more(i);i = classes -> next(i)){
+		class__class* current = (class__class*) (classes -> nth(i));
+    if(current -> get_name() != idtable.lookup_string("Object") && get_class(current -> get_parent()) == NULL){
+			semant_error() << "Class " << current -> get_parent() -> get_string() << " is not defined\n";
+      throw "Compilation error";
+		}
+	}
+}
+void ClassTable::indexify_classes(){
+  bool rooted = false;
+	for(int i = classes -> first();classes -> more(i);i = classes -> next(i)){
+		class__class* current = (class__class*) (classes -> nth(i));
+		if(get_index(current -> get_name()) != -1){
+			semant_error() << "Multiple definitions of class " << current -> get_name() -> get_string() << endl;
+			throw "Compilation error";
+		}
+		add_class_entry(current -> get_name(), i);
+		if(current -> get_name() == idtable.lookup_string("Object"))
+			graph.set_root(i), rooted = true;
+	}
+	if(!rooted){
+		semant_error() << "Object class is not defined\n";
+		throw "Compilation error";
+	}
+}
+void ClassTable::add_class_entry(Symbol name, int index){
+  symId = new SymId(new ClassEntry(name, index), symId); 
+}
+void ClassTable::construct_classes_graph(){
+	for(int i = classes -> first();classes -> more(i);i = classes -> next(i)){
+		class__class* current = (class__class*) (classes -> nth(i));
+		//cout << current -> get_parent() -> get_string() << ' ' << current -> get_name() -> get_string() << endl;
+
+		if(current -> get_name() != idtable.lookup_string("Object"))
+    	graph.add_edge(get_index(current -> get_parent()), get_index(current -> get_name()));
+	}
+  try{
+    graph.construct();
+  }catch(List<int>* cyc){
+    ostream& out = semant_error();
+		out << "Classes: ";
+		for(;cyc;cyc = cyc -> tl()){
+			out << get_name(*cyc -> hd()) << ' ';
+		}
+		out << "forms a cycle\n";
+		throw "Compilation error";
+  }
+}
+Symbol ClassTable::get_name(int index){
+  SymId* cp = symId;
+  for(ClassEntry* ce = cp-> hd();ce;cp = cp -> tl(), ce = cp -> hd()){
+		if(ce -> get_index() == index)
+			return ce -> get_name();
+	} 
+  return NULL; 
+}
+Class_ ClassTable::get_class(Symbol name){
+	for(int i = classes -> first();classes -> more(i);i = classes -> next(i)){
+		class__class* current = (class__class*) classes -> nth(i);
+    if(current -> get_name() == name)
+			return current;
+  }
+	return NULL;
+}
+int ClassTable::get_index(Symbol name){
+  SymId* cp = symId;
+  for(ClassEntry* ce = cp-> hd();ce;cp = cp -> tl(), ce = cp -> hd()){
+		if(ce -> get_name() == name)
+			return ce -> get_index();
+	} 
+  return -1; 
+
+}
+bool ClassTable::is_parent(Class_ p, Class_ c){
+  return graph.is_parent(get_index(((class__class*)p) -> get_name()), get_index(((class__class*)c) -> get_name()));
+}
+bool ClassTable::is_parent(Symbol p, Symbol c){
+  return is_parent(get_class(p), get_class(c));
+}
+
+Symbol ClassTable::lca(Symbol c1, Symbol c2){
+  return get_name(graph.lca(get_index(c1), get_index(c2)));
+}
+void ClassTable::dump_out(){
+  graph.print_tree(this);
+}
+void ClassTable::install_basic_classes() {
+
+    // The tree package uses these globals to annotate the classes built below.
+   // curr_lineno  = 0;
+    Symbol filename = stringtable.add_string("<basic class>");
+    
+    // The following demonstrates how to create dummy parse trees to
+    // refer to basic Cool classes.  There's no need for method
+    // bodies -- these are already built into the runtime system.
+    
+    // IMPORTANT: The results of the following expressions are
+    // stored in local variables.  You will want to do something
+    // with those variables at the end of this method to make this
+    // code meaningful.
+
+    // 
+    // The Object class has no parent class. Its methods are
+    //        abort() : Object    aborts the program
+    //        type_name() : Str   returns a string representation of class name
+    //        copy() : SELF_TYPE  returns a copy of the object
+    //
+    // There is no need for method bodies in the basic classes---these
+    // are already built in to the runtime system.
+
+    Class_ Object_class =
+	class_(Object, 
+	       No_class,
+	       append_Features(
+			       append_Features(
+					       single_Features(method(cool_abort, nil_Formals(), Object, no_expr())),
+					       single_Features(method(type_name, nil_Formals(), Str, no_expr()))),
+			       single_Features(method(copy, nil_Formals(), SELF_TYPE, no_expr()))),
+	       filename);
+
+    // 
+    // The IO class inherits from Object. Its methods are
+    //        out_string(Str) : SELF_TYPE       writes a string to the output
+    //        out_int(Int) : SELF_TYPE            "    an int    "  "     "
+    //        in_string() : Str                 reads a string from the input
+    //        in_int() : Int                      "   an int     "  "     "
+    //
+    Class_ IO_class = 
+	class_(IO, 
+	       Object,
+	       append_Features(
+			       append_Features(
+					       append_Features(
+							       single_Features(method(out_string, single_Formals(formal(arg, Str)),
+										      SELF_TYPE, no_expr())),
+							       single_Features(method(out_int, single_Formals(formal(arg, Int)),
+										      SELF_TYPE, no_expr()))),
+					       single_Features(method(in_string, nil_Formals(), Str, no_expr()))),
+			       single_Features(method(in_int, nil_Formals(), Int, no_expr()))),
+	       filename);  
+
+    //
+    // The Int class has no methods and only a single attribute, the
+    // "val" for the integer. 
+    //
+    Class_ Int_class =
+	class_(Int, 
+	       Object,
+	       single_Features(attr(val, prim_slot, no_expr())),
+	       filename);
+
+    //
+    // Bool also has only the "val" slot.
+    //
+    Class_ Bool_class =
+	class_(Bool, Object, single_Features(attr(val, prim_slot, no_expr())),filename);
+
+    //
+    // The class Str has a number of slots and operations:
+    //       val                                  the length of the string
+    //       str_field                            the string itself
+    //       length() : Int                       returns length of the string
+    //       concat(arg: Str) : Str               performs string concatenation
+    //       substr(arg: Int, arg2: Int): Str     substring selection
+    //       
+    Class_ Str_class =
+	class_(Str, 
+	       Object,
+	       append_Features(
+			       append_Features(
+					       append_Features(
+							       append_Features(
+									       single_Features(attr(val, Int, no_expr())),
+									       single_Features(attr(str_field, prim_slot, no_expr()))),
+							       single_Features(method(length, nil_Formals(), Int, no_expr()))),
+					       single_Features(method(concat, 
+								      single_Formals(formal(arg, Str)),
+								      Str, 
+								      no_expr()))),
+			       single_Features(method(substr, 
+						      append_Formals(single_Formals(formal(arg, Int)), 
+								     single_Formals(formal(arg2, Int))),
+						      Str, 
+						      no_expr()))),
+	       filename);
+  classes = append_Classes(classes, single_Classes(Object_class));
+  classes = append_Classes(classes, single_Classes(Str_class));
+  classes = append_Classes(classes, single_Classes(IO_class));
+  classes = append_Classes(classes, single_Classes(Int_class));
+  classes = append_Classes(classes, single_Classes(Bool_class));
+}
+
+////////////////////////////////////////////////////////////////////
+//
+// semant_error is an overloaded function for reporting errors
+// during semantic analysis.  There are three versions:
+//
+//    ostream& ClassTable::semant_error()                
+//
+//    ostream& ClassTable::semant_error(Class_ c)
+//       print line number and filename for `c'
+//
+//    ostream& ClassTable::semant_error(Symbol filename, tree_node *t)  
+//       print a line number and filename
+//
+///////////////////////////////////////////////////////////////////
+
+ostream& ClassTable::semant_error(Class_ c)
+{                                                             
+    return semant_error(c->get_filename(),c);
+}    
+
+ostream& ClassTable::semant_error(Symbol filename, tree_node *t)
+{
+    error_stream << filename << ":" << t->get_line_number() << ": ";
+    return semant_error();
+}
+
+ostream& ClassTable::semant_error()                  
+{                                                 
+    semant_errors++;                            
+    return error_stream;
+} 
+Classes ClassTable::get_classes(){return classes;}
+// MethodEntry implementation
+
+MethodEntry::MethodEntry(Symbol c, Symbol n, ClassList* s): class_name(c), method_name(n), signature(s){}
+Symbol MethodEntry::get_class_name(){return class_name;}
+Symbol MethodEntry::get_method_name(){return method_name;}
+ClassList* MethodEntry::get_signature(){return signature;}
+
+// Environment implementation
+
+Environment::Environment(ClassTable* ct): methods(new List<MethodEntry>((MethodEntry*)NULL)), symbolTable(new SymbolTable<Symbol, Entry>()){
+  build_method_environment(ct);
+}
+ClassList* Environment::get_signature(Symbol class_name, Symbol method_name){
+  for(MethodEnvironment* mv = methods;mv -> hd();mv = mv -> tl()){
+    MethodEntry* me = mv -> hd();
+    if(me -> get_method_name() == method_name && me -> get_class_name() == class_name)
+      return me -> get_signature();
+  }
+  throw "No Method found with the given data";
+}
+void Environment::build_method_environment(ClassTable* ct){
+  Classes classes = ct -> get_classes();
+  for(int i = classes -> first();classes -> more(i);i = classes -> next(i)){
+    class__class* current = (class__class*) classes -> nth(i);
+    add_class_methods(current);
+  } 
+}
+void Environment::add_class_methods(class__class* c){
+  Features fs = c -> get_features();
+  for(int i = fs -> first();fs -> more(i);i = fs -> next(i)){
+    Feature f = fs -> nth(i);
+    if(f -> get_constructor() == F_METHOD)
+      add_method_entry(c -> get_name(), ((method_class*)f));
+  }
+}
+void Environment::add_method_entry(Symbol class_name, method_class* mc){
+  methods = new List<MethodEntry>(new MethodEntry(class_name, mc -> get_name(), extract_signature(mc)), methods); 
+}
+ClassList* Environment::extract_signature(method_class* mc){
+  ClassList* cs = new List<Entry>((Symbol)NULL);
+  Formals fs = mc -> get_formals();
+  for(int i = fs -> first();fs -> more(i);i = fs -> next(i)){
+   formal_class* f = (formal_class*)fs -> nth(i);
+   cs = new List<Entry>(f -> get_type_decl(), cs);
+  }
+  return cs;
+}
+Environment* Environment::enter_scope(){
+  symbolTable -> enterscope();
+  return this;
+}
+Environment* Environment::add_symtab_entry(Symbol name, Symbol type){
+  symbolTable -> addid(name, type);
+  return this;
+}
+Environment* Environment::set_current_class(Symbol c){
+  class_name = c;
+  return this;
+}
+Environment* Environment::exit_scope(){
+  symbolTable -> exitscope();
+  return this;
+}
+Symbol Environment::get_current_class(){
+  return class_name;
+}
+Symbol Environment::get_type(Symbol obj){
+  return symbolTable -> lookup(obj);
+}
+/*   This is the entry point to the semantic checker.
+
+     Your checker should do the following two things:
+
+     1) Check that the program is semantically correct
+     2) Decorate the abstract syntax tree with type information
+        by setting the `type' field in each Expression node.
+        (see `tree.h')
+
+     You are free to first do 1), make sure you catch all semantic
+     errors. Part 2) can be done in a second stage, when you want
+     to build mycoolc.
+ */
+void program_class::semant()
+{
+    initialize_constants();
+
+    /* ClassTable constructor may do some semantic analysis */
+    ClassTable *classtable = new ClassTable(classes);
+    Environment* env = new Environment(classtable);
+    /* some semantic analysis code may go here */
+   SemanticAnalyzer sa(classtable, env);
+    if (classtable->errors()) {
+	cerr << "Compilation halted due to static semantic errors." << endl;
+	exit(1);
+    }
+}
+SemanticAnalyzer::SemanticAnalyzer(ClassTable* c, Environment* e): ct(c), env(e){
+  annotate_classes(ct -> get_classes());
+}
+void SemanticAnalyzer::annotate_classes(Classes cs){
+  for(int i = cs -> first();cs -> more(i);i = cs -> next(i)){
+		//cout << "123\n";
+    annotate_class(cs -> nth(i));
+	}
+}
+void SemanticAnalyzer::annotate_class(Class_ c){
+  env -> enter_scope();
+  class__class* cl = (class__class*) c;
+	env -> set_current_class(cl -> get_name());
+  Features fs = cl -> get_features();
+  for(int i = fs -> first();fs -> more(i);i = fs -> next(i)){
+    Feature f = fs -> nth(i);
+    if(f -> get_constructor() == F_ATTR)
+      add_attr((attr_class*)f);
+  }
+  for(int i = fs -> first();fs -> more(i);i = fs -> next(i)){
+    Feature f = fs -> nth(i);
+    if(f -> get_constructor() == F_METHOD)
+      annotate_method((method_class*)f);
+  }
+
+  env -> exit_scope();
+}
+void SemanticAnalyzer::add_attr(attr_class* attr){
+	env -> add_symtab_entry(attr -> get_name(), attr -> get_type_decl());
+}
+void SemanticAnalyzer::annotate_method(method_class* method){
+	Expression expr = method -> get_expr();
+	Symbol return_type = method -> get_return_type();
+	Formals formals = method -> get_formals();
+	Symbol expr_type = annotate_expression(expr);
+}
+
+Symbol SemanticAnalyzer::annotate_expression(Expression e){
+	//cout << "In annotating expression: " << e -> get_constructor() << endl;
+  switch(e -> get_constructor()){
+		case E_NO_EXPR:
+			return annotate_noexpr_expression((no_expr_class*)e);
+		case E_ASSIGN:
+			return annotate_assign_expression((assign_class*)e);
+		case E_STATIC_DISPATCH:
+			return annotate_static_dispatch_expression((static_dispatch_class*)e);
+		case E_DISPATCH:
+			return annotate_dispatch_expression((dispatch_class*)e);
+		case E_CONDITIONAL:
+			return annotate_conditional_expression((cond_class*)e);
+		case E_LOOP:
+			return annotate_loop_expression((loop_class*)e);
+		case E_BLOCK:
+			return annotate_block_expression((block_class*)e);
+		case E_LET:
+			return annotate_let_expression((let_class*)e);
+		case E_TYPCASE:
+			return annotate_typcase_expression((typcase_class*)e);
+		case E_NEW:
+			return annotate_new_expression((new__class*)e);
+		case E_ISVOID:
+			return annotate_isvoid_expression((isvoid_class*)e);
+		case E_ADD:
+			return annotate_add_expression((plus_class*)e);
+		case E_SUB:
+			return annotate_sub_expression((sub_class*)e);
+		case E_MUL:
+			return annotate_mul_expression((mul_class*)e);
+		case E_DIVIDE:
+			return annotate_divide_expression((divide_class*)e);
+		case E_NEG:
+			return annotate_neg_expression((neg_class*)e); 
+		case E_LT:
+			return annotate_lt_expression((lt_class*)e);
+		case E_LEQ:
+			return annotate_leq_expression((leq_class*)e);
+		case E_EQ:
+			return annotate_eq_expression((eq_class*)e);
+		
+case E_COMP:
+			return annotate_comp_expression((comp_class*)e);
+		case E_OBJECT:
+			return annotate_object_expression((object_class*)e);
+		case E_INT:
+			return annotate_int_expression((int_const_class*)e);
+		case E_STRING:
+			return annotate_string_expression((string_const_class*)e);
+		case E_BOOL:
+			return annotate_bool_expression((bool_const_class*)e);
+		default:
+			assert(false);
+	}
+
+}
+
+Symbol SemanticAnalyzer::annotate_assign_expression(assign_class* e){
+	Expression expr = e -> get_expr();
+	Symbol id    = e -> get_name();
+  Symbol id_type = env -> get_type(id);
+  Symbol expr_type = annotate_expression(expr);
+  //cout << "ID_TYPE: ";id_type -> print(cout);cout << endl;
+  //cout << "EXPRESSION type: ";expr_type -> print(cout);cout << endl;
+  if(!ct -> is_parent(id_type, expr_type))
+		ct -> semant_error() << "Semantic error at line " << e -> get_line_number() << ": Type conformance error in assignment expression.\n";
+  e -> set_type(expr_type);
+	return expr_type;
+}
+
+Symbol SemanticAnalyzer::annotate_static_dispatch_expression(static_dispatch_class* e){
+
+}
+
+Symbol SemanticAnalyzer::annotate_dispatch_expression(dispatch_class* e){
+
+}
+
+Symbol SemanticAnalyzer::annotate_conditional_expression(cond_class* e){
+	Expression pred = e -> get_pred();
+  Expression then_exp = e -> get_then_exp();
+  Expression else_exp = e -> get_else_exp();
+  Symbol pred_type = annotate_expression(pred);
+	Symbol then_exp_type = annotate_expression(then_exp);
+	Symbol else_exp_type = annotate_expression(else_exp);
+	if(pred_type != idtable.lookup_string("Bool")){
+    ct -> semant_error() << "Semantic error at line " << pred -> get_line_number() << ": The type of the predicate is not Bool.\n";
+  }
+  Symbol type = ct -> lca(then_exp_type, else_exp_type);
+  e -> set_type(type);
+  return type;
+}
+
+Symbol SemanticAnalyzer::annotate_loop_expression(loop_class* e){
+	Expression pred = e -> get_pred();
+  Expression body = e -> get_body();
+  Symbol pred_type = annotate_expression(pred);
+  annotate_expression(body);
+  if(pred_type != idtable.lookup_string("Bool")){
+    ct -> semant_error() << "Semantic error at line " << pred -> get_line_number() << ": The type of the predicate is not Bool.\n";
+	}
+	Symbol type = idtable.lookup_string("Object");
+  e -> set_type(type);
+	return type;
+}
+
+Symbol SemanticAnalyzer::annotate_block_expression(block_class* e){
+	Expressions body = e -> get_body();
+  Symbol type;
+  for(int i = body -> first();body -> more(i);i = body -> next(i)){
+		Expression current_e = body -> nth(i);
+    type = annotate_expression(current_e);
+	}
+  e -> set_type(type);
+  return type;
+}
+
+Symbol SemanticAnalyzer::annotate_let_expression(let_class* e){
+  Symbol id = e -> get_identifier();
+  Symbol id_type = e -> get_type_decl();
+  if(id_type == SELF_TYPE)
+    id_type = env -> get_current_class();
+  Expression init = e -> get_init();
+  Expression body = e -> get_body();
+  Symbol init_type = annotate_expression(init);
+	if(!ct -> is_parent(id_type, init_type))
+    ct -> semant_error() << "Semantic error at line " << id -> get_line_number() << ": Type conformance error in let initialization expression.\n";
+  env -> enter_scope();
+  env -> add_symtab_entry(id, id_type);
+  Symbol body_type = annotate_expression(body);
+  env -> exit_scope();
+  e -> set_type(body_type);
+  return body_type;
+}
+
+Symbol SemanticAnalyzer::annotate_typcase_expression(typcase_class* e){
+
+}
+
+Symbol SemanticAnalyzer::annotate_new_expression(new__class* e){
+	Symbol type_name = e -> get_type_name();
+  Symbol type = type_name;
+  if(type_name == SELF_TYPE)
+    type = env -> get_current_class();
+  e -> set_type(type);
+	return type;
+}
+
+Symbol SemanticAnalyzer::annotate_isvoid_expression(isvoid_class* e){
+	annotate_expression(e -> get_expr());
+  e -> set_type(Bool);
+  return Bool;
+}
+
+Symbol SemanticAnalyzer::annotate_add_expression(plus_class* e){
+
+}
+
+Symbol SemanticAnalyzer::annotate_sub_expression(sub_class* e){
+
+}
+
+Symbol SemanticAnalyzer::annotate_mul_expression(mul_class* e){
+
+}
+
+Symbol SemanticAnalyzer::annotate_divide_expression(divide_class* e){
+
+}
+
+Symbol SemanticAnalyzer::annotate_neg_expression(neg_class* e){
+
+}
+
+Symbol SemanticAnalyzer::annotate_lt_expression(lt_class* e){
+
+}
+
+Symbol SemanticAnalyzer::annotate_leq_expression(leq_class* e){
+
+}
+
+Symbol SemanticAnalyzer::annotate_eq_expression(eq_class* e){
+
+}
+
+Symbol SemanticAnalyzer::annotate_comp_expression(comp_class* e){
+
+}
+
+Symbol SemanticAnalyzer::annotate_object_expression(object_class* e){
+	Symbol type = env -> get_type(e -> get_name());
+	e -> set_type(type);
+	return type;
+}
+
+Symbol SemanticAnalyzer::annotate_int_expression(int_const_class* e){
+	e -> set_type(Int);
+	return Int;
+}
+
+Symbol SemanticAnalyzer::annotate_string_expression(string_const_class* e){
+	e -> set_type(Str);
+	return Str;
+}
+
+Symbol SemanticAnalyzer::annotate_bool_expression(bool_const_class* e){
+	e -> set_type(Bool);
+	return Bool;
+}
+
+Symbol SemanticAnalyzer::annotate_noexpr_expression(no_expr_class* e){
+	e -> set_type(No_type);
+	return No_type;
+}
